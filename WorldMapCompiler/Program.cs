@@ -21,6 +21,12 @@ internal class Program
         // Alpha = 1f // Opacity (1f for fully opaque)
     };
 
+    private static readonly ResizeOptions Resize256X256 = new()
+    {
+        Size = new Size(256, 256),
+        Sampler = KnownResamplers.Lanczos3,
+    };
+
     private static readonly PngEncoder Encoder = new()
     {
         // Level6 = 3-4% smaller files than Level5 at more than double the encode time
@@ -220,7 +226,7 @@ internal class Program
                                 using (var stream = cascHandler.OpenFile(fdid))
                                 {
                                     var layer = LoadBlp(stream);
-                                    layer.Mutate(ctx => ctx.Resize(256, 256));
+                                    layer.Mutate(ctx => ctx.Resize(Resize256X256));
                                     image1.Mutate(ctx =>
                                         ctx.DrawImage(layer, new Point(cur_y * 256, cur_x * 256), Options));
                                 }
@@ -317,7 +323,7 @@ internal class Program
                                 using (var stream = cascHandler.OpenFile(fdid))
                                 {
                                     var layer = LoadBlp(stream);
-                                    layer.Mutate(ctx => ctx.Resize(256, 256));
+                                    layer.Mutate(ctx => ctx.Resize(Resize256X256));
 
                                     var posY = cur_y * 256 + offsetX;
                                     var posX = cur_x * 256 + offsetY;
@@ -378,7 +384,7 @@ internal class Program
     private static Image<Bgra32> LoadBlp(Stream stream)
     {
         var blp = new BLPFile(stream);
-        var pixels = blp.GetPixels(1, out int width, out int height);
+        var pixels = blp.GetPixels(0, out int width, out int height);
         return Image.LoadPixelData<Bgra32>(pixels, width, height);
     }
     
