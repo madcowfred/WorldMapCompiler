@@ -1,9 +1,6 @@
 ﻿using BLPSharp;
 using Microsoft.Extensions.Configuration;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using NetVips;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -15,24 +12,12 @@ namespace WorldMapCompiler;
 
 internal class Program
 {
-    private static readonly GraphicsOptions Options = new()
+    private static readonly VOption PngVOption = new()
     {
-        AlphaCompositionMode = PixelAlphaCompositionMode.SrcOver, // SrcOver (default), SrcAtop, etc.
-        ColorBlendingMode = PixelColorBlendingMode.Normal, // Normal, Multiply, Screen, etc.
-        // Alpha = 1f // Opacity (1f for fully opaque)
-    };
-
-    private static readonly ResizeOptions Resize256X256 = new()
-    {
-        Size = new Size(256, 256),
-        Sampler = KnownResamplers.Lanczos3,
-    };
-
-    private static readonly PngEncoder Encoder = new()
-    {
-        // Level6 = 3-4% smaller files than Level5 at more than double the encode time
-        CompressionLevel = PngCompressionLevel.Level5,
-        FilterMethod = PngFilterMethod.Adaptive,
+        { "compression", 5 },
+        { "strip", true },
+        { "interlace", false },
+        { "filter", Enums.ForeignPngFilter.None }
     };
 
     private static void Main(string[] args)
@@ -212,7 +197,9 @@ internal class Program
                     res_y = (maxCols + 1) * 256;
                 }
 
-                Image<Bgra32> image1 = new((int)res_y, (int)res_x);
+                // TODO: add alpha?
+                using var image1 = NewTransparentImage((int)res_y, (int)res_x);
+                var image1Tiles = new List<Image>();
 
                 for (var cur_x = 0; cur_x < maxRows + 1; cur_x++)
                 {
@@ -226,10 +213,14 @@ internal class Program
                             {
                                 using (var stream = new MemoryStream(buildInstance.OpenFileByFDID((uint)fdid)))
                                 {
-                                    var layer = LoadBlp(stream);
-                                    layer.Mutate(ctx => ctx.Resize(Resize256X256));
-                                    image1.Mutate(ctx =>
-                                        ctx.DrawImage(layer, new Point(cur_y * 256, cur_x * 256), Options));
+                                    using var layer = LoadAndResizeBlp(stream);
+                                    var layerPositioned = layer.Embed(
+                                        x: cur_y * 256,
+                                        y: cur_x * 256,
+                                        width: image1.Width,
+                                        height: image1.Height
+                                    );
+                                    image1Tiles.Add(layerPositioned);
                                 }
                             }
                             catch (Exception e)
@@ -243,7 +234,7 @@ internal class Program
 
                 if (saveUnexplored && image1 != null)
                 {
-                    SaveImage(image1, Path.Join("unexplored", $"{cleanMapName}.png"));
+                    SaveImage(image1, image1Tiles, Path.Join("unexplored", $"{cleanMapName}.png"));
                 }
 
                 if (!saveLayers && !saveExplored)
@@ -251,7 +242,9 @@ internal class Program
                     continue;
                 }
 
-                Image<Bgra32> image2 = new((int)res_x, (int)res_y);
+                // TODO: add alpha?
+                using var image2 = NewTransparentImage((int)res_y, (int)res_x);
+                var image2Tiles = new List<Image>();
 
                 foreach (dynamic wmorow in WorldMapOverlay.Values)
                 {
@@ -306,7 +299,7 @@ internal class Program
                     var layerResX = (maxWMORows + 1) * 256;
                     var layerResY = (maxWMOCols + 1) * 256;
 
-                    var layerImage = new Image<Bgra32>((int)layerResY, (int)layerResX);
+                    using var layerImage = NewTransparentImage((int)res_y, (int)res_x);
 
                     for (var cur_x = 0; cur_x < maxWMORows + 1; cur_x++)
                     {
@@ -323,25 +316,30 @@ internal class Program
                             {
                                 using (var stream = new MemoryStream(buildInstance.OpenFileByFDID((uint)fdid)))
                                 {
-                                    var layer = LoadBlp(stream);
-                                    layer.Mutate(ctx => ctx.Resize(Resize256X256));
+                                    using var layer = LoadAndResizeBlp(stream);
 
                                     var posY = cur_y * 256 + offsetX;
                                     var posX = cur_x * 256 + offsetY;
 
-                                    if (saveLayers)
-                                    {
-                                        layerImage.Mutate(ctx =>
-                                            ctx.DrawImage(layer, new Point(cur_y * 256, cur_x * 256), Options));
-                                    }
+                                    // if (saveLayers)
+                                    // {
+                                    //     layerImage.Mutate(ctx =>
+                                    //         ctx.DrawImage(layer, new Point(cur_y * 256, cur_x * 256), Options));
+                                    // }
 
-                                    image1.Mutate(ctx => ctx.DrawImage(layer, new Point(posY, posX), Options));
+                                    var layerPositioned = layer.Embed(
+                                        x: posY,
+                                        y: posX,
+                                        width: image1.Width,
+                                        height: image1.Height
+                                    );
+                                    image1Tiles.Add(layerPositioned);
 
-                                    if (saveExploredMapsWithoutUnexplored)
-                                    {
-                                        image2.Mutate(ctx =>
-                                            ctx.DrawImage(layer, new Point(posY, posX), Options));
-                                    }
+                                    // if (saveExploredMapsWithoutUnexplored)
+                                    // {
+                                    //     image2.Mutate(ctx =>
+                                    //         ctx.DrawImage(layer, new Point(posY, posX), Options));
+                                    // }
                                 }
                             }
                             catch (Exception e)
@@ -351,27 +349,29 @@ internal class Program
                         }
                     }
 
-                    if (saveLayers)
-                    {
-                        string layersPath = Path.Join("layers", cleanMapName);
-                        if (!Directory.Exists(layersPath))
-                        {
-                            Directory.CreateDirectory(layersPath);
-                        }
-
-                        SaveImage(layerImage, Path.Join("layers", cleanMapName, $"{wmorow.ID}.png"));
-                    }
+                    // if (saveLayers)
+                    // {
+                    //     string layersPath = Path.Join("layers", cleanMapName);
+                    //     if (!Directory.Exists(layersPath))
+                    //     {
+                    //         Directory.CreateDirectory(layersPath);
+                    //     }
+                    //
+                    //     SaveImage(layerImage, Path.Join("layers", cleanMapName, $"{wmorow.ID}.png"));
+                    // }
                 }
 
                 if (saveExplored)
                 {
-                    SaveImage(image1, Path.Join("explored", $"{cleanMapName}.png"));
+                    SaveImage(image1, image1Tiles, Path.Join("explored", $"{cleanMapName}.png"));
                 }
+                
+                image1Tiles.ForEach(img => img.Dispose());
 
-                if (saveExploredMapsWithoutUnexplored)
-                {
-                    SaveImage(image2, Path.Join("exploredNoUnexplored", $"{cleanMapName}.png"));
-                }
+                // if (saveExploredMapsWithoutUnexplored)
+                // {
+                //     SaveImage(image2, Path.Join("exploredNoUnexplored", $"{cleanMapName}.png"));
+                // }
             }
         }
     }
@@ -382,15 +382,56 @@ internal class Program
             .Aggregate(fileName, (current, c) => current.Replace(c.ToString(), string.Empty));
     }
 
-    private static Image<Bgra32> LoadBlp(Stream stream)
+    private static Image NewTransparentImage(int width, int height)
     {
-        var blp = new BLPFile(stream);
-        var pixels = blp.GetPixels(0, out int width, out int height);
-        return Image.LoadPixelData<Bgra32>(pixels, width, height);
+        // 1. Create a 1-pixel black base image (has 1 band by default)
+        using var basePixel = Image.Black(1, 1);
+
+        // 2. Add 3 more empty bands to make it a 4-band image (RGBA)
+        // Then force the data type to 8-bit unsigned char (uchar) and set interpretation to sRGB
+        using var transparentPixel = basePixel.Bandjoin(0, 0, 0)
+            .Cast(Enums.BandFormat.Uchar)
+            .Copy(interpretation: Enums.Interpretation.Srgb);
+
+        // Now you can resize it to your target dimensions if needed
+        var finalImage = transparentPixel.Embed(
+            0,
+            0, 
+            width,
+            height, 
+            extend: Enums.Extend.Background, 
+            background: new double[] { 0, 0, 0, 0 }
+        );
+        
+        return finalImage;
     }
 
-    private static void SaveImage(Image image, string filename)
+    private static Image LoadAndResizeBlp(Stream stream)
     {
-        image.Save(filename, Encoder);
+        using var blp = new BLPFile(stream);
+        var bgraBytes = blp.GetPixels(0, out int width, out int height);
+
+        // load into a NetVips image
+        using var vipsBgra = Image.NewFromMemory(bgraBytes, width, height, bands: 4, format: Enums.BandFormat.Uchar);
+        
+        // swap channels from BGRA to RGBA (R=2, G=1, B=0, A=3)
+        using var vipsRgba = vipsBgra[2].Bandjoin(vipsBgra[1], vipsBgra[0], vipsBgra[3]);
+
+        if (vipsRgba.Width == 256)
+        {
+            return vipsRgba.Copy(interpretation: Enums.Interpretation.Srgb);
+        }
+        else
+        {
+            using var copied = vipsRgba.Copy(interpretation: Enums.Interpretation.Srgb); 
+            return copied.Resize((double)256 / copied.Width);
+        }
+    }
+
+    private static void SaveImage(Image image, List<Image> overlayImages, string filename)
+    {
+        var blendModes = Enumerable.Repeat(Enums.BlendMode.Over, overlayImages.Count).ToArray();
+        using var result = image.Composite(overlayImages.ToArray(), blendModes);
+        result.WriteToFile(filename, PngVOption);
     }
 }
